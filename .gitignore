@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Test
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Raw and processed data
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Vector indexes and local databases
+storage/indexes/*
+!storage/indexes/.gitkeep
+storage/metadata/*
+!storage/metadata/.gitkeep
+
+# Model cache
+models/
