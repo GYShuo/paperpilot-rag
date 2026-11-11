@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from tqdm import tqdm
@@ -18,7 +17,6 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     for split_name, split_data in dataset.items():
-
         paper_path = OUTPUT_DIR / f"{split_name}_papers.jsonl"
         qa_path = OUTPUT_DIR / f"{split_name}_qa.jsonl"
 
@@ -29,7 +27,6 @@ def main():
             open(paper_path, "w", encoding="utf-8") as paper_file,
             open(qa_path, "w", encoding="utf-8") as qa_file,
         ):
-
             for record in tqdm(
                 split_data,
                 desc=f"Processing {split_name}",
@@ -40,9 +37,7 @@ def main():
                     split=split_name,
                 )
 
-                paper_file.write(
-                    paper.model_dump_json() + "\n"
-                )
+                paper_file.write(paper.model_dump_json() + "\n")
 
                 paper_count += 1
 
@@ -53,9 +48,7 @@ def main():
                 )
 
                 for example in examples:
-                    qa_file.write(
-                        example.model_dump_json() + "\n"
-                    )
+                    qa_file.write(example.model_dump_json() + "\n")
 
                     qa_count += 1
 

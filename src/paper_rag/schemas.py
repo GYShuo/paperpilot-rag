@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, Field
 
 
@@ -33,9 +32,7 @@ class PaperDocument(BaseModel):
     abstract: str
     split: str
     sections: list[PaperSection] = Field(default_factory=list)
-    figures_and_tables: list[FigureTable] = Field(
-        default_factory=list
-    )
+    figures_and_tables: list[FigureTable] = Field(default_factory=list)
 
 
 class AnswerAnnotation(BaseModel):
@@ -62,3 +59,20 @@ class QAExample(BaseModel):
     split: str
 
     answers: list[AnswerAnnotation] = Field(default_factory=list)
+
+
+class PaperChunk(BaseModel):
+    """A retrievable text chunk with source metadata."""
+
+    chunk_id: str
+    paper_id: str
+    split: str
+
+    section_index: int
+    section_name: str
+    paragraph_index: int  # 原始段落索引
+
+    start_char: int  # 清洗后段落的起始字符索引
+    end_char: int
+
+    text: str  # 实际检索文本

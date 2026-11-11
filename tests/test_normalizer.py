@@ -1,4 +1,3 @@
-
 from paper_rag.data.normalizer import (
     normalize_paper,
     normalize_qa_examples,
@@ -57,12 +56,8 @@ def test_normalize_qa_examples():
     record = {
         "id": "paper_001",
         "qas": {
-            "question": [
-                "What is the proposed method?"
-            ],
-            "question_id": [
-                "question_001"
-            ],
+            "question": ["What is the proposed method?"],
+            "question_id": ["question_001"],
             "answers": [
                 {
                     "answer": [

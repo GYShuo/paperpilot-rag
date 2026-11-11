@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from datasets import DatasetDict, load_dataset, load_from_disk
@@ -63,8 +62,6 @@ def load_qasper(
 
     # 4. Validate the returned dataset.
     if not isinstance(dataset, DatasetDict):
-        raise TypeError(
-            f"Expected DatasetDict, got {type(dataset).__name__}"
-        )
+        raise TypeError(f"Expected DatasetDict, got {type(dataset).__name__}")
 
     return dataset

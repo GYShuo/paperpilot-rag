@@ -1,4 +1,3 @@
-
 from typing import Any
 
 from paper_rag.schemas import (
@@ -48,18 +47,12 @@ def normalize_paper(
     )
 
     for section_index in range(section_count):
-
         # Get section name.
         raw_name = (
-            section_names[section_index]
-            if section_index < len(section_names)
-            else None
+            section_names[section_index] if section_index < len(section_names) else None
         )
 
-        section_name = (
-            clean_text(raw_name)
-            or f"Section {section_index + 1}"
-        )
+        section_name = clean_text(raw_name) or f"Section {section_index + 1}"
 
         # Get paragraphs belonging to this section.
         raw_paragraphs = (
@@ -73,9 +66,7 @@ def normalize_paper(
 
         paragraphs = []
 
-        for paragraph_index, raw_paragraph in enumerate(
-            raw_paragraphs
-        ):
+        for paragraph_index, raw_paragraph in enumerate(raw_paragraphs):
             text = clean_text(raw_paragraph)
 
             # Skip empty paragraphs.
@@ -108,17 +99,9 @@ def normalize_paper(
     item_count = max(len(captions), len(files))
 
     for item_index in range(item_count):
-        caption = (
-            clean_text(captions[item_index])
-            if item_index < len(captions)
-            else ""
-        )
+        caption = clean_text(captions[item_index]) if item_index < len(captions) else ""
 
-        file = (
-            clean_text(files[item_index])
-            if item_index < len(files)
-            else ""
-        )
+        file = clean_text(files[item_index]) if item_index < len(files) else ""
 
         figures_and_tables.append(
             FigureTable(
@@ -158,7 +141,6 @@ def normalize_qa_examples(
     examples = []
 
     for question_index, raw_question in enumerate(questions):
-
         question = clean_text(raw_question)
 
         if not question:
@@ -174,31 +156,21 @@ def normalize_qa_examples(
             question_id = f"{paper_id}:{question_index}"
 
         answer_group = (
-            answer_groups[question_index]
-            if question_index < len(answer_groups)
-            else {}
+            answer_groups[question_index] if question_index < len(answer_groups) else {}
         )
 
         if not isinstance(answer_group, dict):
             answer_group = {}
 
-        raw_annotations = as_list(
-            answer_group.get("answer")
-        )
+        raw_annotations = as_list(answer_group.get("answer"))
 
-        annotation_ids = as_list(
-            answer_group.get("annotation_id")
-        )
+        annotation_ids = as_list(answer_group.get("annotation_id"))
 
-        worker_ids = as_list(
-            answer_group.get("worker_id")
-        )
+        worker_ids = as_list(answer_group.get("worker_id"))
 
         annotations = []
 
-        for annotation_index, raw_annotation in enumerate(
-            raw_annotations
-        ):
+        for annotation_index, raw_annotation in enumerate(raw_annotations):
             if not isinstance(raw_annotation, dict):
                 continue
 
@@ -229,28 +201,20 @@ def normalize_qa_examples(
                     worker_id=worker_id or None,
                     unanswerable=unanswerable,
                     yes_no=yes_no,
-                    free_form_answer=clean_text(
-                        raw_annotation.get("free_form_answer")
-                    ),
+                    free_form_answer=clean_text(raw_annotation.get("free_form_answer")),
                     extractive_spans=[
                         clean_text(x)
-                        for x in as_list(
-                            raw_annotation.get("extractive_spans")
-                        )
+                        for x in as_list(raw_annotation.get("extractive_spans"))
                         if clean_text(x)
                     ],
                     evidence=[
                         clean_text(x)
-                        for x in as_list(
-                            raw_annotation.get("evidence")
-                        )
+                        for x in as_list(raw_annotation.get("evidence"))
                         if clean_text(x)
                     ],
                     highlighted_evidence=[
                         clean_text(x)
-                        for x in as_list(
-                            raw_annotation.get("highlighted_evidence")
-                        )
+                        for x in as_list(raw_annotation.get("highlighted_evidence"))
                         if clean_text(x)
                     ],
                 )

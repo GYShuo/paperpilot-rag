@@ -1,4 +1,3 @@
-
 from paper_rag.data.qasper_loader import load_qasper
 
 
@@ -18,9 +17,7 @@ def main():
     print("Paragraph groups:", len(paragraph_groups))
     print("Section alignment:", len(sections) == len(paragraph_groups))
 
-    for i, (section, paragraphs) in enumerate(
-        zip(sections, paragraph_groups)
-    ):
+    for i, (section, paragraphs) in enumerate(zip(sections, paragraph_groups)):
         print(f"\nSection {i}: {section}")
         print("Paragraph count:", len(paragraphs))
 
@@ -43,10 +40,7 @@ def main():
     print("Question IDs:", len(question_ids))
     print("Answer groups:", len(answers))
 
-    print(
-        "QA alignment:",
-        len(questions) == len(question_ids) == len(answers)
-    )
+    print("QA alignment:", len(questions) == len(question_ids) == len(answers))
 
     # 3. Inspect one question
     print("\n========== First Question ==========")
@@ -98,11 +92,7 @@ def main():
             if item["qas"] is not None
         )
 
-        print(
-            f"{split_name}: "
-            f"{len(split_data)} papers, "
-            f"{total_questions} questions"
-        )
+        print(f"{split_name}: {len(split_data)} papers, {total_questions} questions")
 
 
 if __name__ == "__main__":
