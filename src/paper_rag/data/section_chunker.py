@@ -22,7 +22,6 @@ def chunk_paper_by_section(
         current_spans: list[ChunkSpan] = []
         chunk_index = 0
 
-
         def flush_chunk(
             section_index: int = section.section_index,
             section_name: str = section.section_name,
