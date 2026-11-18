@@ -1,4 +1,6 @@
-from paper_rag.data.chunker import split_text
+from typing import Literal
+
+from paper_rag.data.chunker import split_text, split_text_semantic
 from paper_rag.schemas import (
     ChunkSpan,
     PaperDocument,
@@ -6,14 +8,27 @@ from paper_rag.schemas import (
 )
 
 
+def has_meaningful_content(text: str) -> bool:
+    """Check whether text contains at least one letter or digit."""
+    return any(char.isalnum() for char in text)
+
+
 def chunk_paper_by_section(
     paper: PaperDocument,
     chunk_size: int = 500,
+    strategy: Literal["fixed", "semantic"] = "fixed",
+    min_tail_size: int = 100,
 ) -> list[SectionChunk]:
     """Chunk a paper by section with greedy paragraph packing."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
+
+    if strategy not in ("fixed", "semantic"):
+        raise ValueError(f"Unsupported chunking strategy: {strategy}")
+
+    if strategy == "semantic" and not 0 <= min_tail_size <= chunk_size:
+        raise ValueError("min_tail_size must be between 0 and chunk_size")
 
     chunks: list[SectionChunk] = []
 
@@ -51,18 +66,30 @@ def chunk_paper_by_section(
         for paragraph in section.paragraphs:
             text = paragraph.text
 
-            if not text.strip():
+            if not has_meaningful_content(text):
                 continue
 
             # Long paragraphs are split into separate windows.
             if len(text) > chunk_size:
                 flush_chunk()
 
-                for start, end, piece in split_text(
-                    text,
-                    chunk_size=chunk_size,
-                    chunk_overlap=0,
-                ):
+                if strategy == "semantic":  # V1：语义感知切分
+                    windows = split_text_semantic(
+                        text,
+                        chunk_size=chunk_size,
+                        min_tail_size=min_tail_size,
+                    )
+                else:  # strategy == "fixed":  V0：固定字符窗口
+                    windows = split_text(
+                        text,
+                        chunk_size=chunk_size,
+                        chunk_overlap=0,
+                    )
+
+                for start, end, piece in windows:
+                    if not has_meaningful_content(piece):
+                        continue
+
                     current_text = piece
                     current_spans = [
                         ChunkSpan(

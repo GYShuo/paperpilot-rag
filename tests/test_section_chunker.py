@@ -121,3 +121,113 @@ def test_span_reconstruction():
             reconstructed[span.paragraph_index] += source_piece
 
     assert reconstructed == original
+
+
+def test_punctuation_only_paragraphs_are_filtered():
+    paper = make_paper([[".", "...", ":", "AAAA", "?)."]])
+
+    chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=10,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].text == "AAAA"
+
+
+def test_short_meaningful_text_is_preserved():
+    paper = make_paper([["AI", "BERT", "x = 1", "人工智能"]])
+
+    chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=100,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].text == "AI\nBERT\nx = 1\n人工智能"
+
+
+def test_punctuation_only_long_paragraph_piece_is_filtered():
+    paper = make_paper([["AAAAA.....BBBBB"]])
+
+    chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=5,
+    )
+
+    assert [chunk.text for chunk in chunks] == [
+        "AAAAA",
+        "BBBBB",
+    ]
+
+
+def test_fixed_strategy_backward_compatibility():
+    """Explicit fixed strategy must match the old default."""
+    paper = make_paper(
+        [
+            ["Alpha sentence. " * 8],
+        ]
+    )
+
+    default_chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=40,
+    )
+
+    fixed_chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=40,
+        strategy="fixed",
+    )
+
+    assert [chunk.model_dump() for chunk in default_chunks] == [
+        chunk.model_dump() for chunk in fixed_chunks
+    ]
+
+
+def test_semantic_strategy_preserves_source_spans():
+    """Semantic chunks must accurately map to source text."""
+    text = ("Alpha sentence ends. " * 8).strip()
+
+    paper = make_paper([[text]])
+
+    chunks = chunk_paper_by_section(
+        paper,
+        chunk_size=50,
+        strategy="semantic",
+        min_tail_size=10,
+    )
+
+    assert len(chunks) > 1
+    assert "".join(chunk.text for chunk in chunks) == text
+
+    for chunk in chunks:
+        assert len(chunk.text) <= 50
+        assert chunk.paper_id == paper.paper_id
+
+        for span in chunk.spans:
+            source_piece = text[span.start_char : span.end_char]
+
+            chunk_piece = chunk.text[span.chunk_start : span.chunk_end]
+
+            assert source_piece == chunk_piece
+
+
+def test_invalid_semantic_strategy_parameters():
+    paper = make_paper([["Alpha sentence."]])
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        chunk_paper_by_section(
+            paper,
+            strategy="unknown",
+        )
+
+    with pytest.raises(ValueError):
+        chunk_paper_by_section(
+            paper,
+            chunk_size=50,
+            strategy="semantic",
+            min_tail_size=100,
+        )
