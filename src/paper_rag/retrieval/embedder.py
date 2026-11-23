@@ -23,6 +23,33 @@ class TextEmbedder:
         if self.dimension is None:
             raise RuntimeError("Cannot determine embedding dimension.")
 
+        self.dimension = int(self.dimension)
+
+    @property
+    def max_seq_length(self) -> int:
+        """Return the embedding model's maximum input length."""
+
+        return int(self.model.max_seq_length)
+
+    def count(self, text: str) -> int:
+        """Count tokens using the embedding model's tokenizer.
+
+        Special tokens are included in the returned count.
+        Truncation is disabled to obtain the full token count.
+        """
+
+        if not isinstance(text, str):
+            raise TypeError("Text must be a string.")
+
+        encoded = self.model.tokenizer(
+            text,
+            add_special_tokens=True,
+            truncation=False,
+            verbose=False,
+        )
+
+        return len(encoded["input_ids"])
+
     def encode_documents(
         self,
         texts: list[str],
