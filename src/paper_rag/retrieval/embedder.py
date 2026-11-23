@@ -1,6 +1,8 @@
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+from paper_rag.schemas import EmbeddingWindow
+
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
@@ -50,6 +52,31 @@ class TextEmbedder:
 
         return len(encoded["input_ids"])
 
+    def _validate_embeddings(
+        self,
+        embeddings: np.ndarray,
+        expected_count: int,
+    ) -> np.ndarray:
+        """Validate and normalize the embedding array representation."""
+
+        vectors = np.asarray(embeddings, dtype=np.float32)
+
+        if vectors.ndim != 2:
+            raise ValueError("Embeddings must be a 2D array.")
+
+        expected_shape = (expected_count, self.dimension)
+
+        if vectors.shape != expected_shape:
+            raise ValueError(
+                f"Embedding shape mismatch: expected {expected_shape}, "
+                f"got {vectors.shape}."
+            )
+
+        if not np.isfinite(vectors).all():
+            raise ValueError("Embeddings contain invalid values.")
+
+        return vectors
+
     def encode_documents(
         self,
         texts: list[str],
@@ -58,14 +85,17 @@ class TextEmbedder:
     ) -> np.ndarray:
         """Encode multiple document texts."""
 
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+
         if not texts:
             return np.empty(
                 (0, self.dimension),
                 dtype=np.float32,
             )
 
-        if any(not text.strip() for text in texts):
-            raise ValueError("Document texts cannot be empty.")
+        if any(not isinstance(text, str) or not text.strip() for text in texts):
+            raise ValueError("Document texts must be non-empty strings.")
 
         embeddings = self.model.encode(
             texts,
@@ -75,10 +105,77 @@ class TextEmbedder:
             show_progress_bar=show_progress_bar,
         )
 
-        return np.asarray(embeddings, dtype=np.float32)
+        return self._validate_embeddings(
+            embeddings,
+            expected_count=len(texts),
+        )
+
+    def encode_windows(
+        self,
+        windows: list[EmbeddingWindow],
+        batch_size: int = 32,
+        show_progress_bar: bool = True,
+    ) -> np.ndarray:
+        """Encode embedding windows without exceeding model input length.
+
+        Each window is validated against the current model tokenizer
+        before encoding.
+
+        The returned embedding rows preserve the input window order.
+        """
+
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+
+        if not windows:
+            return np.empty(
+                (0, self.dimension),
+                dtype=np.float32,
+            )
+
+        max_length = self.max_seq_length
+
+        texts = []
+
+        for window in windows:
+            if not window.text.strip():
+                raise ValueError(f"Embedding window {window.window_id} is empty.")
+
+            actual_count = self.count(window.text)
+
+            if actual_count > max_length:
+                raise ValueError(
+                    f"Embedding window {window.window_id} exceeds "
+                    f"model maximum length: {actual_count} > {max_length}."
+                )
+
+            if actual_count != window.token_count:
+                raise ValueError(
+                    f"Token count mismatch for window {window.window_id}: "
+                    f"stored={window.token_count}, actual={actual_count}. "
+                    "Check whether the same tokenizer was used."
+                )
+
+            texts.append(window.text)
+
+        embeddings = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=show_progress_bar,
+        )
+
+        return self._validate_embeddings(
+            embeddings,
+            expected_count=len(windows),
+        )
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode a single user query."""
+
+        if not isinstance(query, str):
+            raise TypeError("Query must be a string.")
 
         if not query.strip():
             raise ValueError("Query cannot be empty.")
@@ -89,4 +186,15 @@ class TextEmbedder:
             normalize_embeddings=True,
         )
 
-        return np.asarray(embedding, dtype=np.float32)
+        vector = np.asarray(embedding, dtype=np.float32)
+
+        if vector.shape != (self.dimension,):
+            raise ValueError(
+                f"Query embedding shape mismatch: expected "
+                f"({self.dimension},), got {vector.shape}."
+            )
+
+        if not np.isfinite(vector).all():
+            raise ValueError("Query embedding contains invalid values.")
+
+        return vector
