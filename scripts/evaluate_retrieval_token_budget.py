@@ -11,13 +11,13 @@ from tqdm import tqdm
 from paper_rag.evaluation.retrieval_evaluator import (
     EvidenceLocation,
     chunk_evidence_coverage,
+    first_hit_rank,
     first_union_hit_rank,
     locate_body_evidence,
     summarize_ranks,
     union_evidence_coverage,
 )
 from paper_rag.retrieval.embedder import TextEmbedder
-from paper_rag.retrieval.index_store import IndexStore
 from paper_rag.retrieval.windowed_index_store import WindowedIndexStore
 from paper_rag.schemas import (
     PaperDocument,
@@ -33,15 +33,8 @@ from paper_rag.schemas import (
 DEFAULT_BUDGETS = (1024, 2048, 4096)
 DEFAULT_THRESHOLDS = (0.25, 0.5, 0.75)
 
-VERSIONS = ("V0", "V1", "V2")
-
-VERSION_ROLES = {
-    "V0": "diagnostic_only",
-    "V1": "diagnostic_only",
-    "V2": "only_valid_sentence_integrity_candidate",
-}
-
 CHUNK_SEPARATOR = "\n\n"
+TOP_K = 10
 
 RetrievableChunk = SectionChunk | SentenceTokenChunk
 
@@ -106,9 +99,7 @@ def count_tokens(tokenizer, text: str) -> int:
     return len(input_ids)
 
 
-def build_context_text(
-    ranked_chunks: list[RankedChunk],
-) -> str:
+def build_context_text(ranked_chunks: list[RankedChunk]) -> str:
     """Join complete parent chunks in retrieval order."""
 
     return CHUNK_SEPARATOR.join(item.chunk.text for item in ranked_chunks)
@@ -134,11 +125,9 @@ def pack_ranked_chunks(
     2. Never truncate or split a parent chunk.
     3. Skip a chunk that cannot fit.
     4. Continue checking subsequent smaller chunks.
-    5. Re-tokenize the final assembled context to guarantee
-       that its actual token count does not exceed the budget.
+    5. Re-tokenize the final context to verify the hard budget.
 
-    Individual chunk token counts are cached across questions
-    and budgets to avoid repeated tokenization.
+    Token counts are cached by version and chunk ID.
     """
 
     if budget <= 0:
@@ -151,7 +140,6 @@ def pack_ranked_chunks(
     estimated_tokens = 0
     oversized_candidates = 0
 
-    # First pass: greedy packing using cached chunk token counts.
     for candidate in ranked_chunks:
         chunk = candidate.chunk
 
@@ -171,28 +159,23 @@ def pack_ranked_chunks(
         if chunk_tokens < 0:
             raise ValueError("Token count cannot be negative.")
 
-        # An individual chunk cannot fit into this budget.
         if chunk_tokens > budget:
             oversized_candidates += 1
             continue
 
         separator_cost = separator_tokens if selected else 0
-
         additional_tokens = chunk_tokens + separator_cost
 
         if estimated_tokens + additional_tokens <= budget:
             selected.append(candidate)
             estimated_tokens += additional_tokens
 
-    # Second pass: verify the actual assembled context.
-    # Tokenization across text boundaries is not assumed to be
-    # perfectly additive.
     context_text = build_context_text(selected)
 
     actual_tokens = count_tokens(tokenizer, context_text) if context_text else 0
 
-    # If the exact count exceeds the budget, remove complete
-    # trailing chunks until the hard limit is satisfied.
+    # Verify the actual assembled context.
+    # Tokenization at text boundaries may not be additive.
     while selected and actual_tokens > budget:
         selected.pop()
 
@@ -204,14 +187,7 @@ def pack_ranked_chunks(
         raise RuntimeError("Final context exceeds the token budget.")
 
     selected_oversize_sentences = sum(
-        bool(
-            getattr(
-                item.chunk,
-                "oversize_sentence",
-                False,
-            )
-        )
-        for item in selected
+        bool(getattr(item.chunk, "oversize_sentence", False)) for item in selected
     )
 
     return PackedContext(
@@ -227,7 +203,89 @@ def pack_ranked_chunks(
 
 
 # ============================================================
-# Evidence evaluation
+# Raw ranking evaluation
+# ============================================================
+
+
+def evaluate_ranked_chunks(
+    ranked_chunks: list[RankedChunk],
+    locations: list[EvidenceLocation],
+    thresholds: tuple[float, ...],
+) -> dict:
+    """Evaluate raw retrieval ranking before context packing.
+
+    SINGLE:
+        The first individual parent chunk that reaches the
+        evidence coverage threshold.
+
+    UNION:
+        The first prefix of retrieved parent chunks whose
+        combined coverage reaches the threshold.
+    """
+
+    if not locations:
+        raise ValueError("Evidence locations cannot be empty.")
+
+    chunks = [item.chunk for item in ranked_chunks]
+
+    single_ranks = {}
+    union_ranks = {}
+
+    for threshold in thresholds:
+        if not 0 < threshold <= 1:
+            raise ValueError("Threshold must be in (0, 1].")
+
+        key = str(threshold)
+
+        single_ranks[key] = first_hit_rank(
+            chunks,
+            locations,
+            threshold=threshold,
+        )
+
+        union_ranks[key] = first_union_hit_rank(
+            chunks,
+            locations,
+            threshold=threshold,
+        )
+
+    return {
+        "single_ranks": single_ranks,
+        "union_ranks": union_ranks,
+    }
+
+
+def summarize_ranking_results(
+    question_results: list[dict],
+    thresholds: tuple[float, ...],
+) -> dict:
+    """Aggregate raw ranking metrics across questions."""
+
+    if not question_results:
+        raise ValueError("No question results to summarize.")
+
+    summary = {}
+
+    for mode in ("single", "union"):
+        summary[mode] = {}
+
+        rank_key = f"{mode}_ranks"
+
+        for threshold in thresholds:
+            key = str(threshold)
+
+            ranks = [item[rank_key][key] for item in question_results]
+
+            summary[mode][key] = summarize_ranks(
+                ranks,
+                ks=(1, 5, 10),
+            )
+
+    return summary
+
+
+# ============================================================
+# Context evidence evaluation
 # ============================================================
 
 
@@ -243,7 +301,6 @@ def evaluate_packed_context(
 
     chunks = [item.chunk for item in packed.selected]
 
-    # Maximum coverage achieved by any individual selected chunk.
     best_single_coverage = max(
         (
             chunk_evidence_coverage(chunk, location)
@@ -253,7 +310,6 @@ def evaluate_packed_context(
         default=0.0,
     )
 
-    # Maximum coverage achieved by the union of all selected chunks.
     best_union_coverage = max(
         (union_evidence_coverage(chunks, location) for location in locations),
         default=0.0,
@@ -268,7 +324,6 @@ def evaluate_packed_context(
 
         key = str(threshold)
 
-        # First individually sufficient chunk.
         single_rank = next(
             (
                 rank
@@ -288,8 +343,6 @@ def evaluate_packed_context(
             None,
         )
 
-        # First prefix of selected chunks whose union
-        # reaches the evidence coverage threshold.
         union_rank = first_union_hit_rank(
             chunks,
             locations,
@@ -316,7 +369,7 @@ def evaluate_packed_context(
 
 
 # ============================================================
-# Metrics
+# Context budget metrics
 # ============================================================
 
 
@@ -324,7 +377,7 @@ def summarize_budget_results(
     question_results: list[dict],
     thresholds: tuple[float, ...],
 ) -> dict:
-    """Aggregate context and retrieval metrics."""
+    """Aggregate context and evidence metrics."""
 
     if not question_results:
         raise ValueError("No question results to summarize.")
@@ -350,7 +403,6 @@ def summarize_budget_results(
             ks=(1, 5, 10),
         )
 
-        # Evidence appears anywhere in the complete selected context.
         context_hit_rates[key] = {
             "single": (
                 sum(rank is not None for rank in single_ranks) / len(single_ranks)
@@ -491,71 +543,36 @@ def load_questions(split: str) -> tuple[list[dict], dict]:
 
 
 # ============================================================
-# Index loading
+# V2 index loading
 # ============================================================
 
 
-def get_index_dirs(split: str) -> dict[str, Path]:
-    """Return index directories for V0, V1 and V2."""
+def get_v2_index_dir(split: str) -> Path:
+    """Return the only active index directory for this experiment."""
 
-    return {
-        "V0": Path(f"data/indexes/qasper_{split}_dense"),
-        "V1": Path(f"data/indexes/qasper_{split}_semantic_v1"),
-        "V2": Path(f"data/indexes/qasper_{split}_windowed_v2"),
-    }
-
-
-def load_dense_index(
-    directory: Path,
-    model_name: str,
-) -> dict:
-    """Load a dense index and group chunks by paper."""
-
-    if not directory.is_dir():
-        raise FileNotFoundError(f"Index directory does not exist: {directory}")
-
-    chunks, embeddings, manifest = IndexStore(directory).load(
-        expected_model_name=model_name,
-    )
-
-    if len(chunks) != manifest["num_chunks"]:
-        raise ValueError("Dense index chunk count mismatch.")
-
-    indices_by_paper = defaultdict(list)
-
-    for index, chunk in enumerate(chunks):
-        indices_by_paper[chunk.paper_id].append(index)
-
-    grouped = {}
-
-    for paper_id, indices in indices_by_paper.items():
-        index_array = np.asarray(
-            indices,
-            dtype=np.int64,
-        )
-
-        grouped[paper_id] = {
-            "chunks": [chunks[int(index)] for index in index_array],
-            "embeddings": embeddings[index_array],
-        }
-
-    print(f"Loaded {directory.name}: {len(chunks)} chunks, {len(grouped)} papers")
-
-    return grouped
+    return Path(f"data/indexes/qasper_{split}_windowed_v2")
 
 
 def load_windowed_index(
     directory: Path,
     model_name: str,
-) -> tuple[dict, dict]:
-    """Load V2 parent chunks, windows and window embeddings."""
+) -> tuple[dict, dict, dict]:
+    """Load V2 Parent Chunks, Windows and embeddings by paper."""
 
     if not directory.is_dir():
-        raise FileNotFoundError(f"Index directory does not exist: {directory}")
+        raise FileNotFoundError(f"V2 index directory does not exist: {directory}")
 
-    chunks, windows, embeddings, manifest = WindowedIndexStore(directory).load(
+    store = WindowedIndexStore(directory)
+
+    chunks, windows, embeddings, manifest = store.load(
         expected_model_name=model_name,
     )
+
+    if len(chunks) != manifest["num_chunks"]:
+        raise ValueError("V2 parent chunk count mismatch.")
+
+    if embeddings.shape[0] != len(windows):
+        raise ValueError("V2 window and embedding count mismatch.")
 
     chunks_by_paper = defaultdict(list)
     windows_by_paper = defaultdict(list)
@@ -569,70 +586,64 @@ def load_windowed_index(
     grouped = {}
 
     for paper_id, paper_chunks in chunks_by_paper.items():
-        indices = np.asarray(
-            windows_by_paper[paper_id],
-            dtype=np.int64,
-        )
+        indices = windows_by_paper.get(paper_id, [])
+
+        if not indices:
+            raise ValueError(f"Paper {paper_id} has parent chunks but no windows.")
+
+        index_array = np.asarray(indices, dtype=np.int64)
+
+        paper_windows = [windows[int(index)] for index in index_array]
+
+        paper_embeddings = embeddings[index_array]
+
+        if paper_embeddings.shape[0] != len(paper_windows):
+            raise ValueError(f"Window embedding mismatch for paper {paper_id}.")
 
         grouped[paper_id] = {
             "chunks": paper_chunks,
             "chunks_by_id": {chunk.chunk_id: chunk for chunk in paper_chunks},
-            "windows": [windows[int(index)] for index in indices],
-            "embeddings": embeddings[indices],
+            "windows": paper_windows,
+            "embeddings": paper_embeddings,
         }
 
+    config_path = directory / "build_config.json"
+
+    if not config_path.is_file():
+        raise FileNotFoundError(config_path)
+
+    build_config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    if not isinstance(build_config, dict):
+        raise TypeError("V2 build configuration must be a JSON object.")
+
     print(
-        f"Loaded {directory.name}: "
-        f"{len(chunks)} parent chunks, "
-        f"{len(windows)} windows, "
-        f"{len(grouped)} papers"
+        f"Loaded V2 index: {len(chunks)} parent chunks, "
+        f"{len(windows)} windows, {len(grouped)} papers"
     )
 
-    return grouped, manifest
+    return grouped, manifest, build_config
 
 
 # ============================================================
-# Retrieval ranking
+# Dense V2 ranking
 # ============================================================
-
-
-def rank_dense_chunks(
-    query_vector: np.ndarray,
-    index: dict,
-) -> list[RankedChunk]:
-    """Rank all parent chunks in one paper using dense similarity."""
-
-    chunks = index["chunks"]
-    embeddings = index["embeddings"]
-
-    if embeddings.ndim != 2:
-        raise ValueError("Dense embeddings must be a 2D array.")
-
-    if embeddings.shape != (len(chunks), len(query_vector)):
-        raise ValueError("Dense embedding dimensions do not match.")
-
-    scores = embeddings @ query_vector
-
-    order = np.argsort(
-        -scores,
-        kind="stable",
-    )
-
-    return [
-        RankedChunk(
-            rank=rank,
-            score=float(scores[int(position)]),
-            chunk=chunks[int(position)],
-        )
-        for rank, position in enumerate(order, start=1)
-    ]
 
 
 def rank_windowed_chunks(
     query_vector: np.ndarray,
     index: dict,
 ) -> list[RankedChunk]:
-    """Rank V2 parent chunks by their best matching embedding window."""
+    """Rank V2 Parent Chunks using their best matching Window.
+
+    All Parent Chunks in the current paper are ranked.
+    Multiple matching windows from the same parent are collapsed.
+    """
+
+    query = np.asarray(query_vector, dtype=np.float32)
+
+    if query.ndim != 1:
+        raise ValueError("Query embedding must be one-dimensional.")
 
     windows = index["windows"]
     embeddings = index["embeddings"]
@@ -641,10 +652,13 @@ def rank_windowed_chunks(
     if embeddings.ndim != 2:
         raise ValueError("Window embeddings must be a 2D array.")
 
-    if embeddings.shape != (len(windows), len(query_vector)):
+    if embeddings.shape != (len(windows), len(query)):
         raise ValueError("Window embedding dimensions do not match.")
 
-    scores = embeddings @ query_vector
+    scores = embeddings @ query
+
+    if not np.isfinite(scores).all():
+        raise ValueError("Dense retrieval produced invalid scores.")
 
     order = np.argsort(
         -scores,
@@ -657,7 +671,6 @@ def rank_windowed_chunks(
     for position in order:
         window_index = int(position)
         window = windows[window_index]
-
         parent_id = window.parent_chunk_id
 
         if parent_id in seen_parent_ids:
@@ -685,26 +698,30 @@ def rank_windowed_chunks(
 
 
 # ============================================================
-# Version evaluation
+# V2 Dense baseline evaluation
 # ============================================================
 
 
-def evaluate_version(
-    version: str,
+def evaluate_v2_dense(
     questions: list[dict],
     query_vectors: np.ndarray,
-    index: dict,
+    indexes: dict,
     tokenizer,
     budgets: tuple[int, ...],
     thresholds: tuple[float, ...],
-    token_cache: dict[tuple[str, str], int],
+    token_cache: dict,
     separator_tokens: int,
 ) -> dict:
-    """Evaluate one retrieval version under multiple token budgets."""
+    """Evaluate V2 Dense ranking and context budget performance."""
 
-    records = {budget: [] for budget in budgets}
+    if len(questions) != len(query_vectors):
+        raise ValueError("Question count and query embedding count do not match.")
 
-    failure_examples = {budget: [] for budget in budgets}
+    budget_records = {budget: [] for budget in budgets}
+
+    ranking_records = []
+
+    per_question = []
 
     iterator = zip(
         questions,
@@ -715,149 +732,94 @@ def evaluate_version(
     for item, query_vector in tqdm(
         iterator,
         total=len(questions),
-        desc=f"Evaluating {version}",
+        desc="Evaluating V2 Dense",
     ):
         paper_id = item["paper_id"]
-        paper_index = index[paper_id]
 
-        if version == "V2":
-            ranked_chunks = rank_windowed_chunks(
-                query_vector,
-                paper_index,
-            )
-        else:
-            ranked_chunks = rank_dense_chunks(
-                query_vector,
-                paper_index,
-            )
+        if paper_id not in indexes:
+            raise KeyError(f"Missing V2 index for paper {paper_id}.")
+
+        paper_index = indexes[paper_id]
+
+        ranked_chunks = rank_windowed_chunks(
+            query_vector,
+            paper_index,
+        )
+
+        raw_ranking = evaluate_ranked_chunks(
+            ranked_chunks,
+            item["locations"],
+            thresholds,
+        )
+
+        ranking_records.append(raw_ranking)
+
+        question_result = {
+            "paper_id": paper_id,
+            "question_id": item["question_id"],
+            "question": item["question"],
+            "evidence_location_count": len(item["locations"]),
+            "top_10": [
+                {
+                    "rank": candidate.rank,
+                    "chunk_id": candidate.chunk.chunk_id,
+                    "score": candidate.score,
+                }
+                for candidate in ranked_chunks[:TOP_K]
+            ],
+            "raw_ranking": raw_ranking,
+            "context_by_budget": {},
+        }
 
         for budget in budgets:
             packed = pack_ranked_chunks(
                 ranked_chunks=ranked_chunks,
                 tokenizer=tokenizer,
                 budget=budget,
-                version=version,
+                version="V2",
                 token_cache=token_cache,
                 separator_tokens=separator_tokens,
             )
 
-            result = evaluate_packed_context(
+            context_result = evaluate_packed_context(
                 packed=packed,
                 locations=item["locations"],
                 thresholds=thresholds,
             )
 
-            records[budget].append(result)
+            budget_records[budget].append(context_result)
 
-            # Collect V2 cases where the complete context still
-            # fails to cover at least 50% of any gold occurrence.
-            if version == "V2" and result["best_union_evidence_coverage"] < 0.5:
-                failure_examples[budget].append(
-                    {
-                        "paper_id": paper_id,
-                        "question_id": item["question_id"],
-                        "question": item["question"],
-                        "context_tokens": result["context_tokens"],
-                        "selected_chunk_count": (result["selected_chunk_count"]),
-                        "best_single_evidence_coverage": (
-                            result["best_single_evidence_coverage"]
-                        ),
-                        "best_union_evidence_coverage": (
-                            result["best_union_evidence_coverage"]
-                        ),
-                        "oversized_candidates": (result["oversized_candidates"]),
-                        "selected_chunk_ids": [
-                            candidate.chunk.chunk_id for candidate in packed.selected
-                        ],
-                    }
-                )
+            question_result["context_by_budget"][str(budget)] = {
+                **context_result,
+                "selected_chunk_ids": [
+                    candidate.chunk.chunk_id for candidate in packed.selected
+                ],
+                "selected_retrieval_ranks": [
+                    candidate.rank for candidate in packed.selected
+                ],
+            }
 
-    summaries = {}
+        per_question.append(question_result)
 
-    for budget in budgets:
-        summaries[str(budget)] = summarize_budget_results(
-            question_results=records[budget],
+    ranking_summary = summarize_ranking_results(
+        question_results=ranking_records,
+        thresholds=thresholds,
+    )
+
+    budget_summary = {
+        str(budget): summarize_budget_results(
+            question_results=budget_records[budget],
             thresholds=thresholds,
         )
-
-    output = {
-        "role": VERSION_ROLES[version],
-        "budgets": summaries,
+        for budget in budgets
     }
 
-    if version == "V2":
-        output["failure_examples_below_50pct_union"] = {}
-
-        for budget in budgets:
-            examples = sorted(
-                failure_examples[budget],
-                key=lambda item: (
-                    item["best_union_evidence_coverage"],
-                    item["best_single_evidence_coverage"],
-                ),
-            )
-
-            output["failure_examples_below_50pct_union"][str(budget)] = examples[:20]
-
-    return output
-
-
-# ============================================================
-# Historical baseline comparison
-# ============================================================
-
-
-def calculate_legacy_deltas(
-    results: dict,
-    budgets: tuple[int, ...],
-    thresholds: tuple[float, ...],
-) -> dict:
-    """Compare V2 with V0/V1 for diagnosis, not candidate selection."""
-
-    deltas = {}
-
-    for budget in budgets:
-        budget_key = str(budget)
-        deltas[budget_key] = {}
-
-        v2 = results["V2"]["budgets"][budget_key]
-
-        for mode in ("single", "union"):
-            deltas[budget_key][mode] = {}
-
-            for threshold in thresholds:
-                threshold_key = str(threshold)
-
-                v2_metrics = v2["retrieval"][mode][threshold_key]
-
-                v2_context_hit = v2["retrieval"]["context_hit_rate"][threshold_key][
-                    mode
-                ]
-
-                deltas[budget_key][mode][threshold_key] = {}
-
-                for baseline in ("V0", "V1"):
-                    baseline_result = results[baseline]["budgets"][budget_key]
-
-                    baseline_metrics = baseline_result["retrieval"][mode][threshold_key]
-
-                    baseline_context_hit = baseline_result["retrieval"][
-                        "context_hit_rate"
-                    ][threshold_key][mode]
-
-                    deltas[budget_key][mode][threshold_key][baseline] = {
-                        "hit@10_delta": (
-                            v2_metrics["hit@10"] - baseline_metrics["hit@10"]
-                        ),
-                        "mrr@10_delta": (
-                            v2_metrics["mrr@10"] - baseline_metrics["mrr@10"]
-                        ),
-                        "context_hit_rate_delta": (
-                            v2_context_hit - baseline_context_hit
-                        ),
-                    }
-
-    return deltas
+    return {
+        "ranking": ranking_summary,
+        "budgets": budget_summary,
+        "per_question": per_question,
+        "token_cache_entries": len(token_cache),
+    }
 
 
 # ============================================================
@@ -868,16 +830,15 @@ def calculate_legacy_deltas(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate V0/V1/V2 retrieval contexts under fixed token budgets. "
-            "V0 and V1 are diagnostic references only; V2 is the only "
-            "sentence-integrity-eligible candidate."
+            "Evaluate the V2 Dense retrieval baseline only. "
+            "V0 and V1 are not loaded or compared."
         )
     )
 
     parser.add_argument(
         "--split",
         choices=("train", "validation", "test"),
-        default="train",
+        required=True,
     )
 
     parser.add_argument(
@@ -925,17 +886,27 @@ def main() -> None:
 
     split = args.split
 
-    print("\n========== Configuration ==========")
+    output_path = args.output or Path(
+        f"storage/metadata/day6_dense_v2_eval_{split}.json"
+    )
+
+    # Never overwrite existing experimental results.
+    if output_path.exists():
+        parser.error(
+            f"Refusing to overwrite existing result: {output_path}. "
+            "Choose a new --output path."
+        )
+
+    print("\n========== Day 6: V2 Dense Baseline ==========")
     print("Dataset:", split)
-    print("Versions:", VERSIONS)
-    print("Version roles:", VERSION_ROLES)
+    print("Retrieval method: Dense V2")
     print("Context budgets:", budgets)
     print("Evidence thresholds:", thresholds)
-    print("Context separator:", repr(CHUNK_SEPARATOR))
-    print("Ranking scope: all parent chunks within the same paper")
+    print("Ranking scope: all Parent Chunks within the same paper")
+    print("Output:", output_path)
 
     # --------------------------------------------------------
-    # Step 1: Load QA and evidence locations.
+    # Step 1: Load evaluation questions.
     # --------------------------------------------------------
 
     print("\n========== Step 1: Loading Evaluation Data ==========")
@@ -972,36 +943,24 @@ def main() -> None:
     print("Separator tokens:", separator_tokens)
 
     print(
-        "\nWARNING: The embedding tokenizer is used as a proxy "
+        "WARNING: The embedding tokenizer is used as a proxy "
         "because the final generation model has not been selected."
     )
 
     # --------------------------------------------------------
-    # Step 3: Load indexes.
+    # Step 3: Load V2 index only.
     # --------------------------------------------------------
 
-    print("\n========== Step 3: Loading Indexes ==========")
+    print("\n========== Step 3: Loading V2 Index ==========")
 
-    index_dirs = get_index_dirs(split)
+    index_dir = get_v2_index_dir(split)
 
-    indexes = {
-        "V0": load_dense_index(
-            index_dirs["V0"],
-            embedder.model_name,
-        ),
-        "V1": load_dense_index(
-            index_dirs["V1"],
-            embedder.model_name,
-        ),
-    }
-
-    indexes["V2"], v2_manifest = load_windowed_index(
-        index_dirs["V2"],
-        embedder.model_name,
+    indexes, v2_manifest, v2_build_config = load_windowed_index(
+        directory=index_dir,
+        model_name=embedder.model_name,
     )
 
-    print("\n========== V2 Index Configuration ==========")
-
+    print("\nV2 Manifest:")
     print(
         json.dumps(
             v2_manifest,
@@ -1011,26 +970,22 @@ def main() -> None:
     )
 
     # --------------------------------------------------------
-    # Step 4: Build a common evaluation set.
+    # Step 4: Build the evaluation question set.
     # --------------------------------------------------------
 
-    eligible = [
-        item
-        for item in questions
-        if all(item["paper_id"] in indexes[version] for version in VERSIONS)
-    ]
+    eligible = [item for item in questions if item["paper_id"] in indexes]
 
     excluded_missing_index = len(questions) - len(eligible)
 
     print("\n========== Step 4: Evaluation Set ==========")
     print("Eligible questions:", len(eligible))
-    print("Excluded missing index:", excluded_missing_index)
+    print("Excluded missing V2 index:", excluded_missing_index)
 
     if not eligible:
-        raise ValueError("No common evaluable questions.")
+        raise ValueError("No evaluable questions with V2 indexes.")
 
     # --------------------------------------------------------
-    # Step 5: Encode each query once.
+    # Step 5: Encode queries once.
     # --------------------------------------------------------
 
     print("\n========== Step 5: Encoding Queries ==========")
@@ -1041,135 +996,144 @@ def main() -> None:
         show_progress_bar=True,
     )
 
+    if query_vectors.shape != (
+        len(eligible),
+        embedder.dimension,
+    ):
+        raise ValueError("Query embedding shape mismatch.")
+
     print("Query embeddings:", query_vectors.shape)
 
     # --------------------------------------------------------
-    # Step 6: Evaluate all versions and budgets.
+    # Step 6: Evaluate raw ranking and context budgets.
     # --------------------------------------------------------
 
-    print("\n========== Step 6: Token Budget Evaluation ==========")
+    print("\n========== Step 6: V2 Dense Evaluation ==========")
 
     token_cache: dict[tuple[str, str], int] = {}
 
-    results = {}
+    results = evaluate_v2_dense(
+        questions=eligible,
+        query_vectors=query_vectors,
+        indexes=indexes,
+        tokenizer=tokenizer,
+        budgets=budgets,
+        thresholds=thresholds,
+        token_cache=token_cache,
+        separator_tokens=separator_tokens,
+    )
 
-    for version in VERSIONS:
-        results[version] = evaluate_version(
-            version=version,
-            questions=eligible,
-            query_vectors=query_vectors,
-            index=indexes[version],
-            tokenizer=tokenizer,
-            budgets=budgets,
-            thresholds=thresholds,
-            token_cache=token_cache,
-            separator_tokens=separator_tokens,
+    # --------------------------------------------------------
+    # Step 7: Print ranking results.
+    # --------------------------------------------------------
+
+    report_threshold = 0.5 if 0.5 in thresholds else thresholds[0]
+
+    threshold_key = str(report_threshold)
+
+    print("\n========== Raw Ranking Metrics ==========")
+
+    for mode in ("single", "union"):
+        metrics = results["ranking"][mode][threshold_key]
+
+        print(f"\n--- {mode.upper()} / {report_threshold:.0%} ---")
+
+        for name, value in metrics.items():
+            print(f"{name}: {value:.4f}")
+
+    # --------------------------------------------------------
+    # Step 8: Print context budget results.
+    # --------------------------------------------------------
+
+    print("\n========== Context Budget Metrics ==========")
+
+    for budget in budgets:
+        metrics = results["budgets"][str(budget)]
+
+        union_metrics = metrics["retrieval"]["union"][threshold_key]
+
+        context_hit = metrics["retrieval"]["context_hit_rate"][threshold_key]["union"]
+
+        print(f"\n--- Budget: {budget} ---")
+        print(f"Hit@10: {union_metrics['hit@10']:.4f}")
+        print(f"MRR@10: {union_metrics['mrr@10']:.4f}")
+        print(f"Context Hit Rate: {context_hit:.4f}")
+        print(
+            "Mean Context Tokens:",
+            f"{metrics['mean_context_tokens']:.1f}",
+        )
+        print(
+            "Mean Selected Chunks:",
+            f"{metrics['mean_selected_chunks']:.2f}",
         )
 
     # --------------------------------------------------------
-    # Step 7: Compare historical references.
+    # Step 9: Save new results.
     # --------------------------------------------------------
-
-    print("\n========== Step 7: Diagnostic Comparison ==========")
-
-    legacy_deltas = calculate_legacy_deltas(
-        results=results,
-        budgets=budgets,
-        thresholds=thresholds,
-    )
-
-    report_threshold = 0.5 if 0.5 in thresholds else thresholds[0]
-    threshold_key = str(report_threshold)
-
-    for budget in budgets:
-        print(f"\n--- Context Budget: {budget} Tokens ---")
-
-        for version in VERSIONS:
-            metrics = results[version]["budgets"][str(budget)]
-
-            union_metrics = metrics["retrieval"]["union"][threshold_key]
-
-            union_context_hit = metrics["retrieval"]["context_hit_rate"][threshold_key][
-                "union"
-            ]
-
-            print(
-                f"{version} ({results[version]['role']}): "
-                f"Hit@10={union_metrics['hit@10']:.4f}, "
-                f"MRR@10={union_metrics['mrr@10']:.4f}, "
-                f"Context Hit Rate={union_context_hit:.4f}, "
-                f"Mean Tokens={metrics['mean_context_tokens']:.1f}, "
-                f"Mean Chunks={metrics['mean_selected_chunks']:.2f}"
-            )
-
-    # --------------------------------------------------------
-    # Step 8: Save results.
-    # --------------------------------------------------------
-
-    output_path = args.output or Path(
-        f"storage/metadata/context_budget_eval_{split}.json"
-    )
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
 
     output = {
+        "schema_version": 1,
+        "experiment": "day6_dense_v2_baseline",
         "split": split,
+        "retrieval_method": "dense_v2",
+        "retrieval_scope": "within_paper",
         "embedding_model": embedder.model_name,
-        "context_tokenizer": embedder.model_name,
-        "context_tokenizer_is_proxy": True,
-        "token_counting": {
-            "add_special_tokens": False,
-            "truncation": False,
-            "scope": (
-                "Retrieved parent chunk text and chunk separators only. "
-                "Question, system prompt, instructions and metadata "
-                "are excluded."
+        "embedding_dimension": embedder.dimension,
+        "ranking": {
+            "ranking_strategy": (
+                "Rank embedding windows by cosine similarity, "
+                "then assign each parent chunk its best window score."
             ),
+            "parent_deduplication": True,
+            "ranking_scope": ("All parent chunks within the corresponding paper."),
+            "metrics": results["ranking"],
         },
-        "evaluation_goal": (
-            "Evaluate V2 as the only sentence-integrity-eligible "
-            "candidate. V0 and V1 are historical diagnostic references."
-        ),
-        "ranking_scope": (
-            "All parent chunks within the corresponding paper are ranked. "
-            "There is no fixed Top-K cutoff during context packing."
-        ),
-        "packing_policy": (
-            "Greedy ranking-order packing of complete parent chunks. "
-            "Non-fitting chunks are skipped, later smaller chunks may "
-            "still be selected. No chunk is truncated or split. "
-            "The assembled context is re-tokenized before evaluation."
-        ),
-        "context_separator": CHUNK_SEPARATOR,
-        "budgets": list(budgets),
-        "thresholds": list(thresholds),
+        "context_budget_evaluation": {
+            "tokenizer": embedder.model_name,
+            "tokenizer_is_proxy": True,
+            "special_tokens": False,
+            "truncation": False,
+            "context_separator": CHUNK_SEPARATOR,
+            "budgets": list(budgets),
+            "thresholds": list(thresholds),
+            "packing_policy": (
+                "Greedy ranking-order packing of complete parent chunks. "
+                "Non-fitting chunks are skipped; later smaller chunks "
+                "may still be selected. No chunk is truncated or split. "
+                "The final assembled context is re-tokenized."
+            ),
+            "metrics": results["budgets"],
+        },
         "question_statistics": {
             **question_stats,
             "excluded_missing_index": excluded_missing_index,
             "final_evaluable_questions": len(eligible),
         },
         "v2_index_manifest": v2_manifest,
-        "version_roles": VERSION_ROLES,
-        "results": results,
-        "legacy_reference_deltas": legacy_deltas,
-        "token_cache_entries": len(token_cache),
+        "v2_index_build_config": v2_build_config,
+        "token_cache_entries": results["token_cache_entries"],
+        "per_question": results["per_question"],
     }
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     output_path.write_text(
         json.dumps(
             output,
             ensure_ascii=False,
             indent=2,
+            allow_nan=False,
         ),
         encoding="utf-8",
     )
 
     print("\n========== Evaluation Completed ==========")
     print("Results saved to:", output_path)
-    print("Token cache entries:", len(token_cache))
+    print("Token cache entries:", results["token_cache_entries"])
+    print("Evaluated questions:", len(eligible))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from paper_rag.schemas import PaperDocument, SectionChunk
+from paper_rag.schemas import (
+    PaperDocument,
+    SectionChunk,
+    SentenceTokenChunk,
+)
+
+RetrievableChunk = SectionChunk | SentenceTokenChunk
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,7 @@ def locate_body_evidence(
     evidence: str,
 ) -> list[EvidenceLocation]:
     """Find all exact occurrences of evidence in body paragraphs."""
+
     locations = []
 
     if not evidence:
@@ -50,7 +57,7 @@ def locate_body_evidence(
 
 
 def chunk_evidence_coverage(
-    chunk: SectionChunk,
+    chunk: RetrievableChunk,
     location: EvidenceLocation,
 ) -> float:
     """Fraction of one evidence occurrence covered by one chunk."""
@@ -73,10 +80,10 @@ def chunk_evidence_coverage(
     if not intervals:
         return 0.0
 
-    # Merge intervals to prevent double-counting overlapping spans.
     intervals.sort()
 
     merged = []
+
     for left, right in intervals:
         if merged and left <= merged[-1][1]:
             merged[-1] = (
@@ -87,13 +94,14 @@ def chunk_evidence_coverage(
             merged.append((left, right))
 
     covered = sum(right - left for left, right in merged)
+
     evidence_length = location.end_char - location.start_char
 
     return covered / evidence_length
 
 
 def evidence_hit(
-    chunk: SectionChunk,
+    chunk: RetrievableChunk,
     evidence_locations: list[EvidenceLocation],
     threshold: float = 0.5,
 ) -> bool:
@@ -110,10 +118,10 @@ def evidence_hit(
 
 def rank_chunks(
     query_embedding: np.ndarray,
-    chunks: list[SectionChunk],
+    chunks: list[RetrievableChunk],
     embeddings: np.ndarray,
     top_k: int = 10,
-) -> list[SectionChunk]:
+) -> list[RetrievableChunk]:
     """Rank chunks using normalized embedding dot products."""
 
     if top_k <= 0:
@@ -139,14 +147,18 @@ def rank_chunks(
 
 
 def first_hit_rank(
-    ranked_chunks: list[SectionChunk],
+    ranked_chunks: list[RetrievableChunk],
     evidence_locations: list[EvidenceLocation],
     threshold: float = 0.5,
 ) -> int | None:
     """Return the first relevant rank, or None when not found."""
 
     for rank, chunk in enumerate(ranked_chunks, start=1):
-        if evidence_hit(chunk, evidence_locations, threshold):
+        if evidence_hit(
+            chunk,
+            evidence_locations,
+            threshold,
+        ):
             return rank
 
     return None
@@ -181,7 +193,7 @@ def summarize_ranks(
 
 
 def union_evidence_coverage(
-    chunks: list[SectionChunk],
+    chunks: list[RetrievableChunk],
     location: EvidenceLocation,
 ) -> float:
     """Fraction of an evidence occurrence covered by chunk union."""
@@ -214,7 +226,11 @@ def union_evidence_coverage(
     for left, right in intervals:
         if merged and left <= merged[-1][1]:
             previous_left, previous_right = merged[-1]
-            merged[-1] = (previous_left, max(previous_right, right))
+
+            merged[-1] = (
+                previous_left,
+                max(previous_right, right),
+            )
         else:
             merged.append((left, right))
 
@@ -224,7 +240,7 @@ def union_evidence_coverage(
 
 
 def first_union_hit_rank(
-    ranked_chunks: list[SectionChunk],
+    ranked_chunks: list[RetrievableChunk],
     evidence_locations: list[EvidenceLocation],
     threshold: float = 0.5,
 ) -> int | None:
@@ -237,8 +253,8 @@ def first_union_hit_rank(
         retrieved = ranked_chunks[:k]
 
         if any(
-            union_evidence_coverage(retrieved, loc) >= threshold
-            for loc in evidence_locations
+            union_evidence_coverage(retrieved, location) >= threshold
+            for location in evidence_locations
         ):
             return k
 
