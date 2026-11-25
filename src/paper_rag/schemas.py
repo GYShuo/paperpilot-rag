@@ -61,7 +61,7 @@ class QAExample(BaseModel):
     answers: list[AnswerAnnotation] = Field(default_factory=list)
 
 
-class PaperChunk(BaseModel):  # 原始paper段落不会合并的chunk
+class PaperChunk(BaseModel):
     """A retrievable text chunk with source metadata."""
 
     chunk_id: str
@@ -70,12 +70,12 @@ class PaperChunk(BaseModel):  # 原始paper段落不会合并的chunk
 
     section_index: int
     section_name: str
-    paragraph_index: int  # 原始段落索引
+    paragraph_index: int
 
-    start_char: int  # 清洗后段落的起始字符索引
+    start_char: int
     end_char: int
 
-    text: str  # 实际检索文本
+    text: str
 
 
 class ChunkSpan(BaseModel):
@@ -83,11 +83,11 @@ class ChunkSpan(BaseModel):
 
     paragraph_index: int
 
-    # 在原始段落中的偏移量
+    # Offsets in the original paragraph.
     start_char: int
     end_char: int
 
-    # 在最终生成的chunk中的偏移量
+    # Offsets in the final chunk.
     chunk_start: int
     chunk_end: int
 
@@ -104,3 +104,58 @@ class SectionChunk(BaseModel):
 
     text: str
     spans: list[ChunkSpan] = Field(default_factory=list)
+
+
+class SentenceTokenChunk(BaseModel):
+    """A token-budgeted chunk containing complete sentences."""
+
+    chunk_id: str
+    paper_id: str
+    split: str
+
+    section_index: int
+    section_name: str
+
+    text: str
+    spans: list[ChunkSpan] = Field(default_factory=list)
+
+    token_count: int
+    sentence_count: int
+
+    # True when this chunk contains one sentence exceeding
+    # the normal token budget.
+    oversize_sentence: bool = False
+
+
+class EmbeddingWindow(BaseModel):
+    """A token-limited window used for dense embedding.
+
+    Each window maps back to one complete SentenceTokenChunk.
+    Character offsets refer to the parent chunk's text.
+    Token offsets refer to the parent's untruncated token sequence.
+    """
+
+    window_id: str
+    parent_chunk_id: str
+
+    paper_id: str
+    split: str
+
+    section_index: int
+    section_name: str
+
+    window_index: int
+
+    text: str
+
+    # Character offsets in the parent SentenceTokenChunk.
+    start_char: int
+    end_char: int
+
+    # Token offsets in the parent token sequence.
+    # end token index is exclusive.
+    token_start: int
+    token_end: int
+
+    # Actual model input length, including special tokens.
+    token_count: int

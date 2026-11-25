@@ -14,6 +14,7 @@ dependencies = [
     "pymupdf>=2.1",
     "python-dotenv>=1.2.4",
     "sentence-transformers>=6.3.0",
+    "sentencesplit==0.1.0",
     "tqdm>=4.70.1",
 ]
 
