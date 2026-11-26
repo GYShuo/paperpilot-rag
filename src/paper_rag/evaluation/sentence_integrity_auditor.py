@@ -35,9 +35,7 @@ class AuditCollector:
     def add(self, code: str, message: str, **context: Any) -> None:
         self.counts[code] += 1
         if len(self.samples) < self.max_samples:
-            self.samples.append(
-                {"code": code, "message": message, "context": context}
-            )
+            self.samples.append({"code": code, "message": message, "context": context})
 
     @property
     def error_count(self) -> int:
@@ -221,9 +219,7 @@ def audit_source_chunks(
         split_mode="conservative",
     )
 
-    expected_by_paragraph: dict[
-        tuple[str, int, int], list[tuple[int, int, str]]
-    ] = {}
+    expected_by_paragraph: dict[tuple[str, int, int], list[tuple[int, int, str]]] = {}
     sentence_token_counts: list[int] = []
     oversized_sentence_samples: list[dict[str, Any]] = []
 
@@ -252,8 +248,7 @@ def audit_source_chunks(
             )
 
         expected_by_paragraph[paragraph_key] = [
-            (unit.start_char, unit.end_char, unit.text)
-            for unit in sentence_units
+            (unit.start_char, unit.end_char, unit.text) for unit in sentence_units
         ]
 
         for unit in sentence_units:
@@ -271,9 +266,9 @@ def audit_source_chunks(
                     }
                 )
 
-    observed_by_paragraph: dict[
-        tuple[str, int, int], list[tuple[int, int, str]]
-    ] = defaultdict(list)
+    observed_by_paragraph: dict[tuple[str, int, int], list[tuple[int, int, str]]] = (
+        defaultdict(list)
+    )
     chunk_ids: set[str] = set()
     chunk_token_counts: list[int] = []
     oversized_chunk_count = 0
@@ -651,9 +646,7 @@ def audit_embedding_windows(
             )
         windows_by_parent[window.parent_chunk_id].append(window)
 
-    window_counts = [
-        len(windows_by_parent.get(chunk.chunk_id, [])) for chunk in chunks
-    ]
+    window_counts = [len(windows_by_parent.get(chunk.chunk_id, [])) for chunk in chunks]
     parent_token_counts: list[int] = []
     window_token_counts: list[int] = []
 
@@ -774,9 +767,7 @@ def audit_embedding_windows(
         "all_l2_normalized": False,
     }
     has_embedding_rows = embeddings.ndim == 2 and embeddings.shape[0] > 0
-    embeddings_are_finite = (
-        has_embedding_rows and bool(np.isfinite(embeddings).all())
-    )
+    embeddings_are_finite = has_embedding_rows and bool(np.isfinite(embeddings).all())
     if has_embedding_rows and not embeddings_are_finite:
         collector.add(
             "non_finite_embeddings",
@@ -802,9 +793,7 @@ def audit_embedding_windows(
         "window_count": len(windows),
         "windows_per_parent_distribution": _distribution(window_counts),
         "parent_token_distribution": _distribution(parent_token_counts),
-        "window_model_input_token_distribution": _distribution(
-            window_token_counts
-        ),
+        "window_model_input_token_distribution": _distribution(window_token_counts),
         "maximum_window_tokens": max(window_token_counts, default=None),
         "model_max_sequence_length": max_sequence_length,
         "configured_overlap_tokens": overlap_tokens,
@@ -902,9 +891,7 @@ def audit_split(
             stored=manifest.get("max_sequence_length"),
             actual=embedder.max_seq_length,
         )
-    if build_config.get("max_sequence_length") != manifest.get(
-        "max_sequence_length"
-    ):
+    if build_config.get("max_sequence_length") != manifest.get("max_sequence_length"):
         collector.add(
             "sequence_length_config_mismatch",
             "Build config and manifest maximum sequence lengths differ.",

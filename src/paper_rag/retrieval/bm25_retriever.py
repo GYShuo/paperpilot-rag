@@ -22,8 +22,8 @@ class BM25Retriever:
 
     def __init__(
         self,
-        k1: float = 1.5,
-        b: float = 0.75,
+        k1: float = 2.25,
+        b: float = 0.10,
     ):
         if not math.isfinite(k1) or k1 <= 0:
             raise ValueError("k1 must be a positive finite number.")

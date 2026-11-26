@@ -125,9 +125,7 @@ def load_dense_baseline(path: Path) -> dict:
     evaluation_config = data.get("context_budget_evaluation")
 
     if not isinstance(evaluation_config, dict):
-        raise TypeError(
-            "Dense baseline has no valid context budget configuration."
-        )
+        raise TypeError("Dense baseline has no valid context budget configuration.")
 
     budgets = evaluation_config.get("budgets")
     thresholds = evaluation_config.get("thresholds")

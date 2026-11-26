@@ -92,8 +92,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=PROJECT_ROOT
-        / "storage/metadata/sentence_integrity_audit.json",
+        default=PROJECT_ROOT / "storage/metadata/sentence_integrity_audit.json",
         help="Path for the JSON audit report.",
     )
     args = parser.parse_args()
@@ -141,9 +140,7 @@ def main() -> None:
         if "fatal_error" in result:
             print("Fatal error:", result["fatal_error"])
 
-    overall_passed = all(
-        result["passed"] for result in split_results.values()
-    )
+    overall_passed = all(result["passed"] for result in split_results.values())
     report = {
         "audit_name": "V2 Sentence Integrity Audit",
         "model_name": embedder.model_name,
